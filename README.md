@@ -8,7 +8,7 @@ This project is still in development and should be considered experimental, see 
 
 ## Download
 
-Downloads are available from the [releases page](https://github.com/sivel/speedtest/releases).
+Downloads are available from the [releases page](https://github.com/kgersen/go-speedtest/releases).
 
 ## Usage
 
@@ -40,6 +40,13 @@ options:
     Show the version number and exit
   -xml
     Suppress verbose output, only show basic information in XML format
+	-no-download
+    Do not perform download test
+	-no-upload
+    Do not perform upload test
+
+
+
 ```
 
 ## Troubleshooting

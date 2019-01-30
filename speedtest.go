@@ -13,6 +13,8 @@
 //    License for the specific language governing permissions and limitations
 //    under the License.
 
+// Copyright 2019 Kirth Gersen <kgersen@hotmail.com>
+
 package main
 
 import (
@@ -25,23 +27,25 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/kellydunn/golang-geo"
+	geo "github.com/kellydunn/golang-geo"
 )
 
 const (
-	version = "0.0.1"
+	version = "0.0.2"
 )
 
 // Helper function to make it easier for printing and exiting
@@ -64,7 +68,7 @@ func dialTimeout(network string, laddr *net.TCPAddr, raddr *net.TCPAddr, timeout
 	return conn, err
 }
 
-type CliFlags struct {
+type cliFlags struct {
 	List        bool
 	Server      int
 	Interactive bool // Not a direct flag, this is derived from whether a user has or has not selected a machine readable output
@@ -76,10 +80,13 @@ type CliFlags struct {
 	Timeout     int64
 	Share       bool
 	Version     bool
+	NoDownload  bool
+	NoUpload    bool
+	Debug       bool
 }
 
-func NewCliFlags() *CliFlags {
-	return &CliFlags{
+func NewCliFlags() *cliFlags {
+	return &cliFlags{
 		Interactive: true,
 	}
 }
@@ -181,7 +188,7 @@ func (r *Results) ToPng() {
 type Speedtest struct {
 	Configuration *Configuration
 	Servers       *Servers
-	CliFlags      *CliFlags
+	cliFlags      *cliFlags
 	Results       *Results
 	Source        *net.TCPAddr
 	Timeout       time.Duration
@@ -191,21 +198,21 @@ func NewSpeedtest() *Speedtest {
 	return &Speedtest{
 		Configuration: &Configuration{},
 		Servers:       &Servers{},
-		CliFlags:      NewCliFlags(),
+		cliFlags:      NewCliFlags(),
 		Results:       NewResults(),
 	}
 }
 
 // Printf helper that only prints in "interactive" mode
 func (s *Speedtest) Printf(text string, a ...interface{}) {
-	if !s.CliFlags.Interactive {
+	if !s.cliFlags.Interactive {
 		return
 	}
 
 	fmt.Printf(text, a...)
 }
 
-// Fetch Speedtest.net Configuration
+// GetConfiguration fetch the Speedtest.net Configuration
 func (s *Speedtest) GetConfiguration() (*Configuration, error) {
 	res, err := http.Get("https://www.speedtest.net/speedtest-config.php")
 	if err != nil {
@@ -217,7 +224,7 @@ func (s *Speedtest) GetConfiguration() (*Configuration, error) {
 	return s.Configuration, nil
 }
 
-// Fetch Speedtest.net Servers
+// GetServers fetchs the Speedtest.net Servers
 func (s *Speedtest) GetServers(serverId int) (*Servers, error) {
 	res, err := http.Get("https://www.speedtest.net/speedtest-servers.php")
 	if err != nil {
@@ -302,7 +309,7 @@ type Servers struct {
 	Servers []Server `xml:"servers>server"`
 }
 
-// Sort is a method on the function type, By, that sorts the argument slice according to the function.
+// SortServersByDistance is a method on the function type, By, that sorts the argument slice according to the function.
 func (s *Servers) SortServersByDistance() {
 	ps := &serverSorter{
 		servers: s.Servers,
@@ -313,7 +320,7 @@ func (s *Servers) SortServersByDistance() {
 	sort.Sort(ps)
 }
 
-// Sort is a method on the function type, By, that sorts the argument slice according to the function.
+// SortServersByLatency is a method on the function type, By, that sorts the argument slice according to the function.
 func (s *Servers) SortServersByLatency() {
 	ps := &serverSorter{
 		servers: s.Servers,
@@ -349,7 +356,7 @@ func (s *serverSorter) Less(i, j int) bool {
 	return s.by(&s.servers[i], &s.servers[j])
 }
 
-// Calculates the distance to all servers
+// SetDistances calculates the distance to all servers
 func (s *Servers) SetDistances(latitude, longitude float64) {
 	me := geo.NewPoint(latitude, longitude)
 	for i, server := range s.Servers {
@@ -359,7 +366,7 @@ func (s *Servers) SetDistances(latitude, longitude float64) {
 	}
 }
 
-// Tests the 5 closest servers latency, and returns the server with lowest latency
+// TestLatency tests the 5 closest servers latency, and returns the server with lowest latency
 func (s *Servers) TestLatency() *Server {
 	var servers []Server
 	s.SortServersByDistance()
@@ -405,7 +412,7 @@ func (s *Servers) TestLatency() *Server {
 	return &s.Servers[0]
 }
 
-// Goroutine for downloading data
+// Downloader is a Goroutine for downloading data
 func (s *Server) Downloader(ci chan int, co chan []int, wg *sync.WaitGroup, start time.Time, length float64) {
 	defer wg.Done()
 
@@ -462,8 +469,13 @@ func (s *Server) Downloader(ci chan int, co chan []int, wg *sync.WaitGroup, star
 
 }
 
-// Function that controls Downloader goroutine
+// TestDownload controls Downloader goroutines
 func (s *Server) TestDownload(length float64) (float64, time.Duration) {
+
+	if s.speedtest.cliFlags.Debug {
+		log.Printf("DOWNLOAD called - length = %v\n", length)
+	}
+
 	ci := make(chan int)
 	co := make(chan []int)
 	wg := new(sync.WaitGroup)
@@ -498,7 +510,7 @@ func (s *Server) TestDownload(length float64) (float64, time.Duration) {
 	return float64(totalSize) * 8, total
 }
 
-// Goroutine for uploading data
+// Uploader is a Goroutine for uploading data
 func (s *Server) Uploader(ci chan int, co chan []int, wg *sync.WaitGroup, start time.Time, length float64) {
 	defer wg.Done()
 
@@ -545,8 +557,13 @@ func (s *Server) Uploader(ci chan int, co chan []int, wg *sync.WaitGroup, start 
 
 }
 
-// Function that controls Uploader goroutine
+// TestUpload controls Uploader goroutines
 func (s *Server) TestUpload(length float64) (float64, time.Duration) {
+
+	if s.speedtest.cliFlags.Debug {
+		log.Printf("UPLOAD called - length = %v\n", length)
+	}
+
 	ci := make(chan int)
 	co := make(chan []int)
 	wg := new(sync.WaitGroup)
@@ -604,28 +621,47 @@ func main() {
 	speedtest := NewSpeedtest()
 
 	flag.Usage = usage
-	flag.BoolVar(&speedtest.CliFlags.Json, "json", false, "Suppress verbose output, only show basic information in JSON format")
-	flag.BoolVar(&speedtest.CliFlags.Xml, "xml", false, "Suppress verbose output, only show basic information in XML format")
-	flag.BoolVar(&speedtest.CliFlags.Csv, "csv", false, "Suppress verbose output, only show basic information in CSV format")
-	flag.BoolVar(&speedtest.CliFlags.Simple, "simple", false, "Suppress verbose output, only show basic information")
-	flag.BoolVar(&speedtest.CliFlags.List, "list", false, "Display a list of speedtest.net servers sorted by distance")
-	flag.BoolVar(&speedtest.CliFlags.Share, "share", false, "Generate and provide a URL to the speedtest.net share results image")
-	flag.BoolVar(&speedtest.CliFlags.Version, "version", false, "Show the version number and exit")
-	flag.IntVar(&speedtest.CliFlags.Server, "server", 0, "Specify a server ID to test against")
-	flag.StringVar(&speedtest.CliFlags.Source, "source", "", "Source IP address to bind to")
-	flag.Int64Var(&speedtest.CliFlags.Timeout, "timeout", 10, "Timeout in seconds")
+	flag.BoolVar(&speedtest.cliFlags.Json, "json", false, "Suppress verbose output, only show basic information in JSON format")
+	flag.BoolVar(&speedtest.cliFlags.Xml, "xml", false, "Suppress verbose output, only show basic information in XML format")
+	flag.BoolVar(&speedtest.cliFlags.Csv, "csv", false, "Suppress verbose output, only show basic information in CSV format")
+	flag.BoolVar(&speedtest.cliFlags.Simple, "simple", false, "Suppress verbose output, only show basic information")
+	flag.BoolVar(&speedtest.cliFlags.List, "list", false, "Display a list of speedtest.net servers sorted by distance")
+	flag.BoolVar(&speedtest.cliFlags.Share, "share", false, "Generate and provide a URL to the speedtest.net share results image")
+	flag.BoolVar(&speedtest.cliFlags.Version, "version", false, "Show the version number and exit")
+	flag.IntVar(&speedtest.cliFlags.Server, "server", 0, "Specify a server ID to test against")
+	flag.StringVar(&speedtest.cliFlags.Source, "source", "", "Source IP address to bind to")
+	flag.Int64Var(&speedtest.cliFlags.Timeout, "timeout", 10, "Timeout in seconds")
+
+	flag.BoolVar(&speedtest.cliFlags.NoDownload, "no-download", false, "Do not perform download test")
+	flag.BoolVar(&speedtest.cliFlags.NoUpload, "no-upload", false, "Do not perform upload test")
+
+	flag.BoolVar(&speedtest.cliFlags.Debug, "debug", false, "display debugging informations")
+
+	var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to `file`")
+
 	flag.Parse()
 
-	if speedtest.CliFlags.Version {
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal("could not create CPU profile: ", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			log.Fatal("could not start CPU profile: ", err)
+		}
+		defer pprof.StopCPUProfile()
+	}
+
+	if speedtest.cliFlags.Version {
 		printVersion()
 	}
 
-	speedtest.Timeout = time.Duration(speedtest.CliFlags.Timeout) * time.Second
+	speedtest.Timeout = time.Duration(speedtest.cliFlags.Timeout) * time.Second
 
-	if speedtest.CliFlags.Source != "" {
-		source, err := net.ResolveTCPAddr("tcp", speedtest.CliFlags.Source+":0")
+	if speedtest.cliFlags.Source != "" {
+		source, err := net.ResolveTCPAddr("tcp", speedtest.cliFlags.Source+":0")
 		if err != nil {
-			errorf("Could not parse source IP address %s: %s", speedtest.CliFlags.Source, err.Error())
+			errorf("Could not parse source IP address %s: %s", speedtest.cliFlags.Source, err.Error())
 		} else {
 			speedtest.Source = source
 		}
@@ -633,8 +669,8 @@ func main() {
 		speedtest.Source = nil
 	}
 
-	if speedtest.CliFlags.Json || speedtest.CliFlags.Xml || speedtest.CliFlags.Csv || speedtest.CliFlags.Simple {
-		speedtest.CliFlags.Interactive = false
+	if speedtest.cliFlags.Json || speedtest.cliFlags.Xml || speedtest.cliFlags.Csv || speedtest.cliFlags.Simple {
+		speedtest.cliFlags.Interactive = false
 	}
 
 	// ALL THE CPUS!
@@ -646,10 +682,14 @@ func main() {
 		errorf(err.Error())
 	}
 
+	if speedtest.cliFlags.Debug {
+		log.Printf("Max CPU: %v\n", runtime.NumCPU())
+	}
+
 	speedtest.Printf("Testing from %s (%s)...\n", config.Client.ISP, config.Client.IP)
 
 	speedtest.Printf("Retrieving speedtest.net server list...\n")
-	servers, err := speedtest.GetServers(speedtest.CliFlags.Server)
+	servers, err := speedtest.GetServers(speedtest.cliFlags.Server)
 	if err != nil {
 		errorf(err.Error())
 	} else if len(servers.Servers) == 0 {
@@ -658,7 +698,7 @@ func main() {
 
 	servers.SetDistances(config.Client.Latitude, config.Client.Longitude)
 
-	if speedtest.CliFlags.List {
+	if speedtest.cliFlags.List {
 		servers.SortServersByDistance()
 		for _, server := range servers.Servers {
 			speedtest.Printf("%5d) %s (%s, %s) [%0.2f km]\n", server.ID, server.Sponsor, server.Name, server.Country, server.Distance)
@@ -675,27 +715,31 @@ func main() {
 
 	speedtest.Printf("Hosted by %s (%s) [%0.2f km]: %0.2f ms\n", speedtest.Results.Server.Sponsor, speedtest.Results.Server.Name, speedtest.Results.Server.Distance, float64(speedtest.Results.Server.Latency.Nanoseconds())/1000000.0)
 
-	speedtest.Printf("Testing Download Speed")
-	downBits, downDuration := speedtest.Results.Server.TestDownload(config.Download.Length)
-	speedtest.Results.Download = downBits / downDuration.Seconds()
-	speedtest.Printf("Download: %0.2f Mbit/s\n", speedtest.Results.Download/1000/1000)
+	if !speedtest.cliFlags.NoDownload {
+		speedtest.Printf("Testing Download Speed")
+		downBits, downDuration := speedtest.Results.Server.TestDownload(config.Download.Length)
+		speedtest.Results.Download = downBits / downDuration.Seconds()
+		speedtest.Printf("Download: %0.2f Mbit/s\n", speedtest.Results.Download/1000/1000)
+	}
 
-	speedtest.Printf("Testing Upload Speed")
-	upBits, upDuration := speedtest.Results.Server.TestUpload(config.Upload.Length)
-	speedtest.Results.Upload = upBits / upDuration.Seconds()
-	speedtest.Printf("Upload: %0.2f Mbit/s\n", speedtest.Results.Upload/1000/1000)
+	if !speedtest.cliFlags.NoUpload {
+		speedtest.Printf("Testing Upload Speed")
+		upBits, upDuration := speedtest.Results.Server.TestUpload(config.Upload.Length)
+		speedtest.Results.Upload = upBits / upDuration.Seconds()
+		speedtest.Printf("Upload: %0.2f Mbit/s\n", speedtest.Results.Upload/1000/1000)
+	}
 
-	if speedtest.CliFlags.Share {
+	if speedtest.cliFlags.Share {
 		speedtest.Results.ToPng()
 	}
 
-	if speedtest.CliFlags.Json {
+	if speedtest.cliFlags.Json {
 		speedtest.Results.ToJson()
-	} else if speedtest.CliFlags.Xml {
+	} else if speedtest.cliFlags.Xml {
 		speedtest.Results.ToXml()
-	} else if speedtest.CliFlags.Csv {
+	} else if speedtest.cliFlags.Csv {
 		speedtest.Results.ToCsv()
-	} else if speedtest.CliFlags.Simple {
+	} else if speedtest.cliFlags.Simple {
 		speedtest.Results.ToSimple()
 	}
 }
