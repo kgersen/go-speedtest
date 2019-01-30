@@ -6,6 +6,8 @@ This application utilizes the pure socket communication in current use by speedt
 
 This project is still in development and should be considered experimental, see https://github.com/sivel/speedtest-cli for a stable command line client.
 
+This project is based on https://github.com/sivel/go-speedtest
+
 ## Download
 
 Downloads are available from the [releases page](https://github.com/kgersen/go-speedtest/releases).
@@ -40,9 +42,9 @@ options:
     Show the version number and exit
   -xml
     Suppress verbose output, only show basic information in XML format
-	-no-download
+  -no-download
     Do not perform download test
-	-no-upload
+  -no-upload
     Do not perform upload test
 
 
